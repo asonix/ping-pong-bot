@@ -1,0 +1,15 @@
+[package]
+name = "ping-pong"
+description = "A bot to orchestrate ping-pong in group chats"
+version = "0.1.0"
+license = "GPL-3.0"
+authors = ["Riley Trautman <asonix@tamu.edu>"]
+repository = "https://github.com/asonix/ping-pong"
+readme = "README.md"
+keywords = ["telegram", "ping-pong"]
+
+[dependencies]
+dotenv = "0.10"
+telebot = "0.2.1"
+tokio-core = "0.1"
+futures = "0.1"
