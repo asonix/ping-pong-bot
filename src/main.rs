@@ -89,8 +89,8 @@ impl GameState {
     }
 
     fn counter(&self) -> u64 {
-        match self {
-            &GameState::Pong(_, counter, _) => counter,
+        match *self {
+            GameState::Pong(_, counter, _) => counter,
             _ => 0,
         }
     }
@@ -116,7 +116,7 @@ impl GameMessage {
     }
 }
 
-fn winner(bot: RcBot, chat_id: i64, user: &str) {
+fn winner(bot: &RcBot, chat_id: i64, user: &str) {
     bot.inner.handle.spawn(
         bot.message(chat_id, format!("{} wins", user))
             .send()
@@ -126,7 +126,7 @@ fn winner(bot: RcBot, chat_id: i64, user: &str) {
 }
 
 fn user_pinged(
-    bot: RcBot,
+    bot: &RcBot,
     game_map: &mut HashMap<i64, GameState>,
     chat_id: i64,
     user: String,
@@ -208,7 +208,7 @@ fn user_pinged(
 }
 
 fn times_up(
-    bot: RcBot,
+    bot: &RcBot,
     game_map: &mut HashMap<i64, GameState>,
     chat_id: i64,
     timeout_counter: u64,
@@ -258,13 +258,13 @@ fn game_thread(init: State) -> impl Future<Item = (), Error = ()> {
     receiver
         .fold(HashMap::new(), move |mut game, message| match message {
             GameMessage::Ping(chat_id, user) => {
-                user_pinged(bot.clone(), &mut game, chat_id, user, sender.clone());
+                user_pinged(&bot.clone(), &mut game, chat_id, user, sender.clone());
 
                 Ok(game)
             }
             GameMessage::TimesUp(chat_id, timeout_counter) => {
                 times_up(
-                    bot.clone(),
+                    &bot.clone(),
                     &mut game,
                     chat_id,
                     timeout_counter,
