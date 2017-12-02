@@ -212,6 +212,7 @@ fn times_up(
     game_map: &mut HashMap<i64, GameState>,
     chat_id: i64,
     timeout_counter: u64,
+    tx: Sender<GameMessage>,
 ) {
     let game = if let Some(game) = game_map.get(&chat_id) {
         Some(game.clone())
@@ -221,6 +222,16 @@ fn times_up(
 
     if let Some(GameState::Pong(_, counter, username)) = game {
         if counter == timeout_counter {
+            bot.inner.handle.spawn(
+                Timer::default()
+                    .sleep(Duration::from_secs(5))
+                    .map_err(|e| println!("Error: {}", e))
+                    .and_then(move |_| {
+                        tx.send(GameMessage::remove_hold(chat_id))
+                            .map(|_| ())
+                            .map_err(|e| println!("Error: {}", e))
+                    }),
+            );
             winner(bot, chat_id, &username);
             game_map.insert(chat_id, GameState::win());
         }
@@ -232,6 +243,7 @@ fn remove_hold(game_map: &mut HashMap<i64, GameState>, chat_id: i64) {
         game_map.remove(&chat_id);
     }
 }
+
 fn game_thread(init: State) -> impl Future<Item = (), Error = ()> {
     let State {
         bot,
@@ -247,7 +259,13 @@ fn game_thread(init: State) -> impl Future<Item = (), Error = ()> {
                 Ok(game)
             }
             GameMessage::TimesUp(chat_id, timeout_counter) => {
-                times_up(bot.clone(), &mut game, chat_id, timeout_counter);
+                times_up(
+                    bot.clone(),
+                    &mut game,
+                    chat_id,
+                    timeout_counter,
+                    sender.clone(),
+                );
 
                 Ok(game)
             }
