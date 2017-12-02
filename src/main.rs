@@ -16,7 +16,6 @@ use tokio_timer::Timer;
 use dotenv::dotenv;
 use std::env;
 use std::time::{Duration, Instant};
-use std::thread;
 use std::collections::HashMap;
 
 struct State {
@@ -274,12 +273,9 @@ fn main() {
     let (tx, rx) = channel(100);
     let tx_clone = tx.clone();
 
-    let pong_thread = thread::spawn(move || {
-        let mut lp = Core::new().unwrap();
-        let bot = RcBot::new(lp.handle(), &token);
-        lp.run(game_thread(State::new(bot.clone(), tx_clone, rx)))
-            .unwrap();
-    });
+    lp.handle().spawn(game_thread(
+        State::new(bot.clone(), tx_clone, rx),
+    ));
 
     let handle = bot.new_cmd("/ping")
         .map_err(|e| println!("Failed to get command: {:?}", e))
@@ -307,6 +303,4 @@ fn main() {
     bot.register(handle);
 
     bot.run(&mut lp).unwrap();
-
-    let _ = pong_thread.join();
 }
