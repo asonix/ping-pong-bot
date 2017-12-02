@@ -4,13 +4,15 @@ extern crate dotenv;
 extern crate telebot;
 extern crate tokio_core;
 extern crate futures;
+extern crate tokio_timer;
 
 use telebot::bot::RcBot;
 use telebot::functions::FunctionMessage;
 use tokio_core::reactor::Core;
 use futures::{Future, Sink, Stream};
 use futures::future::lazy;
-use futures::sync::mpsc::{Receiver, channel};
+use futures::sync::mpsc::{Receiver, Sender, channel};
+use tokio_timer::Timer;
 use dotenv::dotenv;
 use std::env;
 use std::time::{Duration, Instant};
@@ -19,37 +21,86 @@ use std::collections::HashMap;
 
 struct State {
     bot: RcBot,
+    sender: Sender<GameMessage>,
     receiver: Receiver<GameMessage>,
 }
 
 impl State {
-    fn new(bot: RcBot, receiver: Receiver<GameMessage>) -> Self {
+    fn new(bot: RcBot, sender: Sender<GameMessage>, receiver: Receiver<GameMessage>) -> Self {
         State {
-            bot: bot,
-            receiver: receiver,
+            bot,
+            sender,
+            receiver,
         }
     }
 }
 
 #[derive(PartialEq, Debug, Clone)]
 enum GameState {
-    None,
-    Pong(String),
+    Start,
+    Hold(Instant),
+    Win(Instant),
+    Pong(Instant, u64, String),
 }
 
 impl GameState {
     fn new() -> Self {
-        GameState::None
+        GameState::Start
     }
 
-    fn ping(self, username: String) -> Self {
-        GameState::Pong(username)
+    fn hold() -> Self {
+        GameState::Hold(Instant::now())
+    }
+
+    fn win() -> Self {
+        GameState::Win(Instant::now())
+    }
+
+    fn ping(self, username: String) -> Option<Self> {
+        match self {
+            GameState::Start => Some(GameState::Pong(Instant::now(), 0, username)),
+            GameState::Hold(end) => {
+                let current_time = Instant::now();
+
+                if current_time - end < Duration::from_secs(5) {
+                    // Wait 5 seconds between games
+                    None
+                } else {
+                    Some(GameState::Pong(current_time, 0, username))
+                }
+            }
+            GameState::Win(end) => {
+                let current_time = Instant::now();
+
+                if current_time - end < Duration::from_secs(5) {
+                    // Wait 5 seconds between games
+                    Some(GameState::Win(end))
+                } else {
+                    Some(GameState::Pong(current_time, 0, username))
+                }
+            }
+            GameState::Pong(_, counter, prev_username) => {
+                if username == prev_username {
+                    None
+                } else {
+                    Some(GameState::Pong(Instant::now(), counter + 1, username))
+                }
+            }
+        }
+    }
+
+    fn counter(&self) -> u64 {
+        match self {
+            &GameState::Pong(_, counter, _) => counter,
+            _ => 0,
+        }
     }
 }
 
 enum GameMessage {
     Ping(i64, String),
-    Check,
+    TimesUp(i64, u64),
+    RemoveHold(i64),
 }
 
 impl GameMessage {
@@ -57,8 +108,12 @@ impl GameMessage {
         GameMessage::Ping(chat_id, username)
     }
 
-    fn check() -> Self {
-        GameMessage::Check
+    fn times_up(chat_id: i64, counter: u64) -> Self {
+        GameMessage::TimesUp(chat_id, counter)
+    }
+
+    fn remove_hold(chat_id: i64) -> Self {
+        GameMessage::RemoveHold(chat_id)
     }
 }
 
@@ -73,14 +128,24 @@ fn winner(bot: RcBot, chat_id: i64, user: &str) {
 
 fn user_pinged(
     bot: RcBot,
-    game_map: &mut HashMap<i64, (Instant, GameState)>,
+    game_map: &mut HashMap<i64, GameState>,
     chat_id: i64,
     user: String,
+    tx: Sender<GameMessage>,
 ) {
     let state = match game_map.get(&chat_id) {
-        Some(game_tup) => {
-            let state = game_tup.clone();
-            (Instant::now(), state.1.ping(user))
+        Some(game @ &GameState::Pong(..)) => game.clone().ping(user),
+        Some(game) => {
+            let game = game.clone().ping(user);
+            if let Some(GameState::Pong(..)) = game {
+                bot.inner.handle.spawn(
+                    bot.message(chat_id, "New game!".into())
+                        .send()
+                        .map(|_| ())
+                        .map_err(|e| println!("Error: {:?}", e)),
+                );
+            }
+            game
         }
         None => {
             bot.inner.handle.spawn(
@@ -89,52 +154,112 @@ fn user_pinged(
                     .map(|_| ())
                     .map_err(|e| println!("Error: {:?}", e)),
             );
-            (Instant::now(), GameState::new().ping(user))
+            GameState::new().ping(user)
         }
     };
 
-    game_map.insert(chat_id, state);
-}
+    let timer = Timer::default();
 
-fn check(
-    bot: RcBot,
-    duration: Duration,
-    chat_id: i64,
-    previous_time: Instant,
-    game: &GameState,
-) -> bool {
-    let current_time = Instant::now();
-    if current_time - previous_time > duration {
-        if let &GameState::Pong(ref user) = game {
-            winner(bot, chat_id, user);
-        }
-        false
+    if let Some(game @ GameState::Pong(..)) = state {
+        let counter = game.counter();
+
+        bot.inner.handle.spawn(
+            timer
+                .sleep(Duration::from_secs(3))
+                .map_err(|e| println!("Error: {}", e))
+                .and_then(move |_| {
+                    tx.send(GameMessage::times_up(chat_id, counter))
+                        .map(|_| ())
+                        .map_err(|e| println!("Error: {}", e))
+                }),
+        );
+        bot.inner.handle.spawn(
+            bot.message(chat_id, "pong".into())
+                .send()
+                .map(|_| ())
+                .map_err(|e| println!("Error: {:?}", e)),
+        );
+        game_map.insert(chat_id, game);
+    } else if let Some(GameState::Win(..)) = state {
+        bot.inner.handle.spawn(
+            bot.message(chat_id, "Please wait 5 seconds".into())
+                .send()
+                .map(|_| ())
+                .map_err(|e| println!("Error: {:?}", e)),
+        );
     } else {
-        true
+        bot.inner.handle.spawn(
+            timer
+                .sleep(Duration::from_secs(5))
+                .map_err(|e| println!("Error: {}", e))
+                .and_then(move |_| {
+                    tx.send(GameMessage::remove_hold(chat_id))
+                        .map(|_| ())
+                        .map_err(|e| println!("Error: {}", e))
+                }),
+        );
+        bot.inner.handle.spawn(
+            bot.message(chat_id, "Don't ping your own pong. You lose.".into())
+                .send()
+                .map(|_| ())
+                .map_err(|e| println!("Error: {:?}", e)),
+        );
+        game_map.insert(chat_id, GameState::hold());
     }
 }
 
-fn game_thread(init: State) -> impl Future<Item = (), Error = ()> {
-    let State { bot, receiver } = init;
+fn times_up(
+    bot: RcBot,
+    game_map: &mut HashMap<i64, GameState>,
+    chat_id: i64,
+    timeout_counter: u64,
+) {
+    let game = if let Some(game) = game_map.get(&chat_id) {
+        Some(game.clone())
+    } else {
+        None
+    };
 
-    let duration = Duration::from_secs(3);
+    if let Some(GameState::Pong(_, counter, username)) = game {
+        if counter == timeout_counter {
+            winner(bot, chat_id, &username);
+            game_map.insert(chat_id, GameState::win());
+        }
+    }
+}
+
+fn remove_hold(game_map: &mut HashMap<i64, GameState>, chat_id: i64) {
+    if let Some(&GameState::Hold(..)) = game_map.get(&chat_id) {
+        game_map.remove(&chat_id);
+    }
+}
+fn game_thread(init: State) -> impl Future<Item = (), Error = ()> {
+    let State {
+        bot,
+        sender,
+        receiver,
+    } = init;
 
     receiver
         .fold(HashMap::new(), move |mut game, message| match message {
             GameMessage::Ping(chat_id, user) => {
-                user_pinged(bot.clone(), &mut game, chat_id, user);
+                user_pinged(bot.clone(), &mut game, chat_id, user, sender.clone());
 
                 Ok(game)
             }
-            GameMessage::Check => {
-                game.retain(|k, &mut (v0, ref mut v1)| {
-                    check(bot.clone(), duration.clone(), k.clone(), v0, &v1)
-                });
+            GameMessage::TimesUp(chat_id, timeout_counter) => {
+                times_up(bot.clone(), &mut game, chat_id, timeout_counter);
+
                 Ok(game)
             }
-        })
+            GameMessage::RemoveHold(chat_id) => {
+                remove_hold(&mut game, chat_id);
+
+                Ok(game)
+            }
+        } as
+            Result<HashMap<_, _>, ()>)
         .map(|_| ())
-        .map_err(|_| ())
 }
 
 fn main() {
@@ -152,12 +277,13 @@ fn main() {
     let pong_thread = thread::spawn(move || {
         let mut lp = Core::new().unwrap();
         let bot = RcBot::new(lp.handle(), &token);
-        lp.run(game_thread(State::new(bot.clone(), rx))).unwrap();
+        lp.run(game_thread(State::new(bot.clone(), tx_clone, rx)))
+            .unwrap();
     });
 
     let handle = bot.new_cmd("/ping")
         .map_err(|e| println!("Failed to get command: {:?}", e))
-        .and_then(move |(bot, msg)| {
+        .and_then(move |(_bot, msg)| {
             let tx = tx.clone();
 
             let chat_id = msg.chat.id;
@@ -173,31 +299,14 @@ fn main() {
             }).and_then(move |(chat_id, name)| {
                 tx.clone()
                     .send(GameMessage::ping(chat_id, name))
-                    .map(move |_| (bot.clone(), chat_id))
+                    .map(|_| ())
                     .map_err(|e| println!("Failed to send GameMessage: {}", e))
             })
-        })
-        .and_then(|(bot, chat_id)| {
-            bot.message(chat_id, "pong".into())
-                .send()
-                .map(|_| ())
-                .map_err(|e| println!("Error: {:?}", e))
         });
 
     bot.register(handle);
 
-    let timer_thread = thread::spawn(move || loop {
-        thread::sleep(Duration::from_millis(1000));
-        let res = tx_clone.clone().send(GameMessage::check()).wait();
-
-        match res {
-            Ok(_) => (),
-            Err(e) => println!("Error: {}", e),
-        }
-    });
-
     bot.run(&mut lp).unwrap();
 
-    let _ = timer_thread.join();
     let _ = pong_thread.join();
 }
