@@ -239,8 +239,12 @@ fn times_up(
 }
 
 fn remove_hold(game_map: &mut HashMap<i64, GameState>, chat_id: i64) {
-    if let Some(&GameState::Hold(..)) = game_map.get(&chat_id) {
-        game_map.remove(&chat_id);
+    match game_map.get(&chat_id) {
+        Some(&GameState::Hold(..)) |
+        Some(&GameState::Win(..)) => {
+            game_map.remove(&chat_id);
+        }
+        _ => (),
     }
 }
 
