@@ -324,5 +324,13 @@ fn main() {
 
     bot.register(handle);
 
-    bot.run(&mut lp).unwrap();
+    lp.run(
+        bot.get_stream()
+            .map(|_| ())
+            .or_else(|e| {
+                println!("Error: {:?}", e);
+                Ok(()) as Result<(), ()>
+            })
+            .for_each(|_| Ok(())),
+    ).unwrap();
 }
