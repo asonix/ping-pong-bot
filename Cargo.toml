@@ -10,7 +10,7 @@ keywords = ["telegram", "ping-pong"]
 
 [dependencies]
 dotenv = "0.10"
-telebot = "0.2.1"
+telebot = "0.2.5"
 tokio-core = "0.1"
 futures = "0.1"
 tokio-timer = "0.1"
